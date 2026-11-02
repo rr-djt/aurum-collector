@@ -42,9 +42,25 @@ CITIES = {
     "Pune": "Maharashtra", "Jaipur": "Rajasthan", "Lucknow": "Uttar Pradesh", "Kanpur": "Uttar Pradesh",
     "Nagpur": "Maharashtra", "Indore": "Madhya Pradesh", "Thane": "Maharashtra",
 }
-# Other spellings jeweller sites use for the same city / state.
-ALIASES = {"bengaluru": ["bangalore"], "mumbai": ["borivalli", "borivali", "ghatkopar", "andheri", "dadar"],
-           "tamil nadu": ["tamilnadu"], "delhi": ["new delhi", "ncr"], "kolkata": ["calcutta"]}
+# Other spellings jeweller sites use for the same city / state, and the
+# neighbourhoods some list their stores by (Kalyan: "Camac Street" = Kolkata).
+ALIASES = {
+    "mumbai": ["bombay", "borivalli", "borivali", "ghatkopar", "andheri", "dadar", "malad", "kandivali", "mulund",
+               "chembur", "goregaon", "santacruz", "bandra", "vile parle", "matunga", "kurla", "powai", "vashi"],
+    "delhi": ["new delhi", "ncr", "karol bagh", "dwarka", "pitampura", "preet vihar", "south extension",
+              "defence colony", "vegas mall", "kamla nagar", "kamala nagar", "rajouri garden", "janakpuri",
+              "lajpat nagar", "rohini", "saket"],
+    "kolkata": ["calcutta", "camac street", "gariahat", "salt lake", "behala", "park street", "new town"],
+    "bengaluru": ["bangalore", "jayanagar", "koramangala", "malleswaram", "marathahalli", "phoenix mall",
+                  "lulu bengaluru", "kammanahalli", "whitefield", "indiranagar", "rajajinagar", "basavanagudi"],
+    "hyderabad": ["secunderabad", "kukatpally", "dilsukhnagar", "ameerpet", "banjara hills", "himayatnagar",
+                  "kphb", "madhapur", "abids"],
+    "chennai": ["madras", "t nagar", "t.nagar", "anna nagar", "velachery", "adyar", "purasawalkam", "tambaram",
+                "mylapore", "porur"],
+    "pune": ["hadapsar", "kothrud", "pimpri", "chinchwad", "aundh", "camp"],
+    "ahmedabad": ["cg road", "maninagar", "satellite"],
+    "tamil nadu": ["tamilnadu"],
+}
 
 
 def now_iso():
@@ -161,12 +177,14 @@ def kalyan():
     hdr = {"X-Requested-With": "XMLHttpRequest"}
     opts = lambda html: re.findall(r'value="([^"]+)"[^>]*>\s*([^<]+?)\s*<', html)
     states = opts(fetch(ajax + "get_state_ajax", form={"country": "1"}, headers=hdr))
-    rows = []
+    rows, store_cache = [], {}
     for city, state in CITIES.items():
         sid = next((v for v, t in states if norm(t) in names_for(state)), None)
         if not sid:
             continue
-        stores = opts(fetch(ajax + "get_city_ajax", form={"state": sid}, headers=hdr))
+        if sid not in store_cache:
+            store_cache[sid] = opts(fetch(ajax + "get_city_ajax", form={"state": sid}, headers=hdr))
+        stores = store_cache[sid]
         pick = next(((v, t) for v, t in stores if norm(t) in names_for(city)), None)
         if not pick:
             continue                                   # no Kalyan store listed for this city
@@ -202,9 +220,13 @@ def khazana():
 
 
 def grt():
-    t = page_text(fetch("https://www.grtjewels.com/"))
-    k22 = num((re.search(r"22\s*KT\s*/\s*1g\s*-\s*₹\s*([\d,.]+)", t, re.I) or [None, None])[1])
-    return "region", [reading(None, k22, None, None, city="Chennai")]
+    """GRT's page carries its whole rate list as data ("gold_rate": 24/22/18 KT, silver)."""
+    html = fetch("https://www.grtjewels.com/").replace('\\"', '"')
+    m = re.search(r'"gold_rate":(\[.*?\])', html)
+    rates = json.loads(m.group(1)) if m else []
+    get = lambda typ, pur: next((num(r.get("amount")) for r in rates if r.get("type") == typ and
+                                 (pur is None or re.sub(r"\s+", "", str(r.get("purity")).upper()) == pur.replace(" ", "").upper()) and r.get("weight") == 1), None)
+    return "region", [reading(get("GOLD", "24 KT"), get("GOLD", "22 KT"), get("SILVER", None), None, city="Chennai")]
 
 
 def bangalore_refinery():
@@ -224,6 +246,95 @@ def bangalore_refinery():
     return "national", [reading(bar10 and round(bar10 / 10), None, kg and round(kg / 1000, 2), as_of)]
 
 
+def dp_jewellers():
+    """D.P. Jewellers (D.P. Abhushan): the metal_rates data its own online store loads."""
+    rows = json.loads(fetch("https://prod-dpj.acmepadm.com/api/v1/metal_rates?locale=en"))["data"]
+    def pick(metal, purity):
+        r = next((x for x in rows if x.get("metal_type") == metal and
+                  (purity is None or str(x.get("purity_description", "")).upper() == purity)), None)
+        return (num(r.get("sale_rate")), r.get("rate_datetime")) if r else (None, None)
+    (k24, t), (k22, _), (sv, _) = pick("gold", "24KT"), pick("gold", "22KT"), pick("silver", None)
+    return "national", [reading(k24, k22, sv, t)]
+
+
+CANDERE_CITY = {"Mumbai": "mumbai", "Delhi": "delhi", "Bengaluru": "bangalore", "Hyderabad": "hyderabad",
+                "Chennai": "chennai", "Pune": "pune", "Lucknow": "lucknow", "Thane": "kalyan-thane"}
+
+
+def candere():
+    """Candere (Kalyan's online store): one page per city with a dated daily table."""
+    rows = []
+    for city, slug in CANDERE_CITY.items():
+        t = page_text(fetch("https://www.candere.com/gold-rate-today/" + slug)).replace("&#8377;", "₹")
+        m = re.search(r"Last\s*10\s*Days\s*\(1g\)\s*Date\s*24K\s*22K\s*18K\s*14K\s*([A-Z][a-z]{2}\s*\d{1,2},\s*\d{4})"
+                      r"\s*₹\s*([\d,]+)\s*₹\s*([\d,]+)", t)
+        if m:
+            day = dt.datetime.strptime(re.sub(r"\s+", " ", m.group(1)), "%b %d, %Y").date().isoformat()
+            r = reading(num(m.group(2)), num(m.group(3)), None, day, city=city)
+            table = t[m.start():m.start() + 1500]
+            r["history"] = [{"day": dt.datetime.strptime(re.sub(r"\s+", " ", h.group(1)), "%b %d, %Y").date().isoformat(),
+                             "k24": num(h.group(2)), "k22": num(h.group(3))}
+                            for h in re.finditer(r"([A-Z][a-z]{2}\s*\d{1,2},\s*\d{4})\s*₹\s*([\d,]+)\s*₹\s*([\d,]+)", table)]
+            rows.append(r)
+        time.sleep(1)
+    return "city", rows
+
+
+CARATLANE_CITY = {"Mumbai": "maharashtra/mumbai", "Delhi": "delhi/new-delhi", "Bengaluru": "karnataka/bangalore",
+                  "Hyderabad": "telangana/hyderabad", "Ahmedabad": "gujarat/ahmedabad", "Chennai": "tamil-nadu/chennai",
+                  "Kolkata": "west-bengal/kolkata", "Pune": "maharashtra/pune"}
+
+
+def caratlane():
+    rows = []
+    for city, path in CARATLANE_CITY.items():
+        t = page_text(fetch("https://www.caratlane.com/gold-rate/%s-gold-rate-today" % path))
+        m = re.search(r"₹\s*([\d,]+)\s*/\s*Gram\s*·\s*24KT\s*22KT\s*₹\s*([\d,]+)", t)
+        if m:
+            rows.append(reading(num(m.group(1)), num(m.group(2)), None, None, city=city))
+        time.sleep(1)
+    return "city", rows
+
+
+def augmont():
+    t = page_text(fetch("https://augmont.com/live-rates"))
+    k24 = num((re.search(r"24K\s*Gold/g\s*[+-]?[\d.]+%\s*₹\s*([\d,]+)", t) or [None, None])[1])
+    k22 = num((re.search(r"22K\s*Gold/g\s*[+-]?[\d.]+%\s*₹\s*([\d,]+)", t) or [None, None])[1])
+    m = re.search(r"last refreshed on (\d{1,2} [A-Z][a-z]{2} \d{4}) at (\d{1,2}:\d{2} [ap]m)", t, re.I)
+    as_of = None
+    if m:
+        try:
+            as_of = dt.datetime.strptime(m.group(1) + " " + m.group(2).upper(), "%d %b %Y %I:%M %p").isoformat()
+        except ValueError:
+            pass
+    return "national", [reading(k24, k22, None, as_of)]
+
+
+def indriya():
+    """Indriya publishes a 30-day rate history as data for its main store (Indore)."""
+    today = dt.datetime.now(IST).date()
+    url = ("https://www.indriya.com/content/noveljewels/in/en/gold-rate-today/jcr:content/root/container/container/"
+           "container_copy_copy__1497933197/chartcomponent.goldChart.json?storeId=NS0001&fromDate=%s&toDate=%s"
+           % (today - dt.timedelta(days=30), today))
+    data = json.loads(json.loads(fetch(url))["ratesJson"])
+    latest, hist = {}, {}
+    for p in data.get("purities", []):
+        items = ((p.get("data") or {}).get("getMetalRateData") or {}).get("items") or []
+        key = {"24KT": "k24", "22KT": "k22"}.get(p.get("purity", "")[:4].upper())
+        for it in items:
+            if key and it.get("event_date"):
+                hist.setdefault(it["event_date"], {"day": it["event_date"]})[key] = round(num(it.get("metal_rate")) or 0, 2) or None
+        if items:
+            it = max(items, key=lambda i: i.get("event_date", ""))
+            latest[p.get("purity", "")[:4].upper()] = (num(it.get("metal_rate")), it.get("event_date"), it.get("city"))
+    k24, k22 = latest.get("24KT"), latest.get("22KT")
+    city = (k22 or k24 or (None, None, "Indore"))[2] or "Indore"
+    r = reading(k24 and round(k24[0], 2), k22 and round(k22[0], 2), None,
+                (k22 or k24 or (None, None))[1], city=city if city in CITIES else "Indore")
+    r["history"] = sorted(hist.values(), key=lambda h: h["day"])
+    return "store", [r]
+
+
 # id, display name, own website, reader (None = refuses automatic reading), kind
 JEWELLERS = [
     ("malabar", "Malabar Gold & Diamonds", "https://www.malabargoldanddiamonds.com", malabar, "jeweller"),
@@ -234,8 +345,15 @@ JEWELLERS = [
     ("thangamayil", "Thangamayil Jewellery", "https://www.thangamayil.com", thangamayil, "jeweller"),
     ("khazana", "Khazana Jewellery", "https://www.khazanajewellery.com", khazana, "jeweller"),
     ("grt", "GRT Jewellers", "https://www.grtjewels.com", grt, "jeweller"),
+    ("dpjewellers", "D.P. Jewellers", "https://www.dpjewellers.com", dp_jewellers, "jeweller"),
+    ("candere", "Candere by Kalyan", "https://www.candere.com", candere, "jeweller"),
+    ("caratlane", "CaratLane", "https://www.caratlane.com", caratlane, "jeweller"),
+    ("indriya", "Indriya", "https://www.indriya.com", indriya, "jeweller"),
+    ("augmont", "Augmont", "https://www.augmont.com", augmont, "bullion"),
     ("bangalorerefinery", "Bangalore Refinery", "https://www.bangalorerefinery.com", bangalore_refinery, "bullion"),
+    # These refuse server readers; the apps read them in the user's own Chrome (AURUM_READER on the server).
     ("tanishq", "Tanishq", "https://www.tanishq.co.in", None, "jeweller"),
+    ("bhima", "Bhima Jewellers", "https://www.bhimagold.com", None, "jeweller"),
     ("mmtcpamp", "MMTC-PAMP", "https://www.mmtcpamp.com", None, "bullion"),
 ]
 
@@ -271,12 +389,15 @@ def check(rows, kind, ref22):
     return kept, notes
 
 
-def collect(only=None):
+def collect(only=None, progress=None):
+    """Read every jeweller once. progress(done, total, name) is called as it goes
+    (the app's Refresh button shows it)."""
     started = now_iso()
     results = []
-    for jid, name, site, reader, kind in JEWELLERS:
-        if only and jid not in only:
-            continue
+    todo = [j for j in JEWELLERS if not only or j[0] in only]
+    for n, (jid, name, site, reader, kind) in enumerate(todo):
+        if progress:
+            progress(n, len(todo), name)
         entry = {"id": jid, "name": name, "site": site, "kind": kind, "read_at": now_iso()}
         if reader is None:
             entry.update(status="blocked", note="This jeweller's website doesn't allow automatic rate reading.")
