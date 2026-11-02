@@ -92,6 +92,31 @@ class Blocked(Exception):
 _robots = {}
 
 
+def _merge_star_groups(lines):
+    """Some sites write several "User-agent: *" sections; Python's parser only honours the
+    first. Fold every "*" rule into one section so none of them is missed."""
+    star, rest, cur = [], [], None
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        k, v = (x.strip() for x in line.split(":", 1))
+        if k.lower() == "user-agent":
+            if cur is None or cur[1]:                  # a new section starts
+                cur = [[], []]
+                (rest if v != "*" else star).append(cur)
+            cur[0].append(v)
+        elif cur is not None:
+            cur[1].append("%s: %s" % (k, v))
+    out = ["User-agent: *"] + [r for g in star for r in g[1]] if star else []
+    for agents, rules in rest:
+        if "*" in agents:
+            out += ["User-agent: *"] + rules           # mixed section: keep it as it is
+        else:
+            out += ["User-agent: %s" % a for a in agents] + rules
+    return out
+
+
 def allowed(url):
     base = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(url))
     if base not in _robots:
@@ -99,7 +124,7 @@ def allowed(url):
         try:
             body = urllib.request.urlopen(urllib.request.Request(base + "/robots.txt", headers={"User-Agent": UA}),
                                           timeout=TIMEOUT).read().decode("utf-8", "replace")
-            rp.parse(body.splitlines())
+            rp.parse(_merge_star_groups(body.splitlines()))
         except Exception:
             rp.parse([])          # no robots.txt (or unreachable) = no rules
         _robots[base] = rp
@@ -173,28 +198,24 @@ def lalithaa():
 
 
 def kalyan():
-    ajax = "https://www.kalyanjewellers.net/kalyan_gold_rates/ajax/"
-    hdr = {"X-Requested-With": "XMLHttpRequest"}
-    opts = lambda html: re.findall(r'value="([^"]+)"[^>]*>\s*([^<]+?)\s*<', html)
-    states = opts(fetch(ajax + "get_state_ajax", form={"country": "1"}, headers=hdr))
-    rows, store_cache = [], {}
-    for city, state in CITIES.items():
-        sid = next((v for v, t in states if norm(t) in names_for(state)), None)
-        if not sid:
-            continue
-        if sid not in store_cache:
-            store_cache[sid] = opts(fetch(ajax + "get_city_ajax", form={"state": sid}, headers=hdr))
-        stores = store_cache[sid]
-        pick = next(((v, t) for v, t in stores if norm(t) in names_for(city)), None)
-        if not pick:
-            continue                                   # no Kalyan store listed for this city
-        res = json.loads(fetch(ajax + "get_rate", form={"countryId": "1", "stateId": sid, "cityId": pick[0]}, headers=hdr))
-        t = page_text(res.get("html", ""))
-        k22 = num((re.search(r"22\s*kt\s*:\s*INR\s*([\d,.]+)", t, re.I) or [None, None])[1])
-        k24 = num((re.search(r"24\s*kt\s*:\s*INR\s*([\d,.]+)", t, re.I) or [None, None])[1])
-        rows.append(reading(k24, k22, None, None, city=city, area=pick[1].title()))
+    """Kalyan Jewellers: its store site has one gold-rate page per city with a dated
+    "Gold Purity per 10g" table (24K and 22K). Per-gram rate = the 10 g price ÷ 10."""
+    rows = []
+    for city in CITIES:
+        t = page_text(fetch("https://store.kalyanjewellers.net/gold-rate/%s/en" % city.lower()))
+        m = re.search(r"Gold\s*Purity\s*per\s*10g\s*Today\s*Yesterday\s*24k\s*₹\s*([\d,]+)\s*₹\s*[\d,]+\s*22k\s*₹\s*([\d,]+)", t, re.I)
+        d = re.search(r"Updated\s*on\s*\w+,\s*(\d+)\w*\s+(\w+)\s+(\d{4})", t)
+        if m:
+            as_of = None
+            if d:
+                try:
+                    as_of = dt.datetime.strptime("%s %s %s" % d.groups(), "%d %B %Y").date().isoformat()
+                except ValueError:
+                    pass
+            k24, k22 = num(m.group(1)), num(m.group(2))
+            rows.append(reading(k24 and round(k24 / 10), k22 and round(k22 / 10), None, as_of, city=city))
         time.sleep(1)                                  # gentle: one request a second
-    return "store", rows
+    return "city", rows
 
 
 def jos_alukkas():
@@ -355,6 +376,7 @@ JEWELLERS = [
     ("tanishq", "Tanishq", "https://www.tanishq.co.in", None, "jeweller"),
     ("bhima", "Bhima Jewellers", "https://www.bhimagold.com", None, "jeweller"),
     ("mmtcpamp", "MMTC-PAMP", "https://www.mmtcpamp.com", None, "bullion"),
+    ("joyalukkas", "Joyalukkas", "https://www.joyalukkas.in", None, "jeweller"),
 ]
 
 
